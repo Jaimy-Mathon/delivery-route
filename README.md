@@ -1,36 +1,58 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Delivery Route Scanner
 
-## Getting Started
+Production-ready Next.js web app for delivery drivers to:
 
-First, run the development server:
+- capture or upload a delivery list photo,
+- extract addresses with OCR,
+- review/edit/reorder stops,
+- generate an optimized route,
+- navigate stop-by-stop with Google Maps launch support.
+
+## Stack
+
+- Next.js (App Router) + TypeScript
+- Tailwind CSS + shadcn/ui components
+- Tesseract.js OCR (client-side)
+- Zustand (persisted local state for offline fallback)
+- dnd-kit for drag-and-drop stop ordering
+
+## Run locally
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Production build:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run build
+npm run start
+```
 
-## Learn More
+## App flow
 
-To learn more about Next.js, take a look at the following resources:
+1. Home (`/`)
+	- Camera capture (mobile) or gallery upload
+	- Desktop drag-and-drop
+	- Image preview
+	- OCR scan with progress
+2. Review (`/review`)
+	- Editable extracted address list
+	- Delete entries
+	- Drag-and-drop reorder
+	- Duplicate cleanup
+	- Optional skipping of stops without house number
+3. Navigation (`/navigation`)
+	- Full-screen next-stop style controls
+	- Big tap targets for one-handed use
+	- Mark as delivered + auto-advance
+	- In-app step list + Google Maps launch
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Notes
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- OCR quality depends on image sharpness and lighting.
+- Address parsing includes NL/EU style heuristics and supports manual correction.
+- Route optimization uses a lightweight nearest-neighbor postal heuristic.
