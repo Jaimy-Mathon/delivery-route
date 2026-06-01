@@ -1,13 +1,19 @@
+def adaptive_contrast(img):
+def denoise(img):
+def sharpen(img):
+def threshold_binary(img):
+def normalize_text_confidence(text: str, conf: float, threshold: float = 0.6):
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 import numpy as np
 import cv2
 from PIL import Image
 import io
-import easyocr
+from paddleocr import PaddleOCR
 
 app = FastAPI()
-reader = easyocr.Reader(['en','nl'], gpu=False)
+# Initialize PaddleOCR (CPU). For better languages/models adjust accordingly.
+ocr = PaddleOCR(use_angle_cls=True, lang='en')
 
 
 def to_gray(img):
@@ -18,7 +24,8 @@ def to_gray(img):
 
 def deskew_image(img):
     gray = to_gray(img)
-    coords = cv2.findNonZero(cv2.bitwise_not(cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]))
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    coords = cv2.findNonZero(cv2.bitwise_not(thresh))
     if coords is None:
         return img
     angle = cv2.minAreaRect(coords)[-1]
@@ -37,7 +44,7 @@ def deskew_image(img):
 
 def adaptive_contrast(img):
     gray = to_gray(img)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     cl = clahe.apply(gray)
     return cl
 
@@ -47,7 +54,7 @@ def denoise(img):
 
 
 def sharpen(img):
-    blur = cv2.GaussianBlur(img, (0,0), 3)
+    blur = cv2.GaussianBlur(img, (0, 0), 3)
     sharpened = cv2.addWeighted(img, 1.6, blur, -0.6, 0)
     return sharpened
 
@@ -58,7 +65,6 @@ def threshold_binary(img):
 
 
 def normalize_text_confidence(text: str, conf: float, threshold: float = 0.6):
-    # EasyOCR gives a single confidence per text; spread it over chars
     if not text or len(text.strip()) == 0:
         return ""
     chars = []
@@ -77,12 +83,12 @@ async def health():
 
 
 @app.post('/ocr')
-async def ocr(image: UploadFile = File(...)):
+async def ocr_endpoint(image: UploadFile = File(...)):
     try:
         contents = await image.read()
         pil = Image.open(io.BytesIO(contents)).convert('RGB')
         arr = np.array(pil)[:, :, ::-1].copy()
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=400, detail='Invalid image')
 
     # Preprocessing pipeline
@@ -93,20 +99,36 @@ async def ocr(image: UploadFile = File(...)):
     img = sharpen(img)
     bin_img = threshold_binary(img)
 
-    # Run EasyOCR
+    # Run PaddleOCR
     try:
-        results = reader.readtext(bin_img)
-    except Exception as e:
+        results = ocr.ocr(bin_img, cls=True)
+    except Exception:
         raise HTTPException(status_code=500, detail='OCR failed')
 
-    if not results:
-        return JSONResponse({'text': 'GEEN TEKST GEVONDEN'})
-
+    # results is list of lists: each item -> [box, (text, confidence)] or similar
     lines = []
-    for bbox, txt, conf in results:
-        normalized = normalize_text_confidence(txt, conf, threshold=0.6)
-        if normalized:
-            lines.append(normalized)
+    for item in results:
+        # paddle may return nested lists
+        if not item:
+            continue
+        # item could be [box, (text, conf)] or list of such
+        if isinstance(item[0][0], (list, tuple)):
+            # nested structure
+            for sub in item:
+                text = sub[1][0] if len(sub) > 1 and isinstance(sub[1], (list, tuple)) else ''
+                conf = float(sub[1][1]) if len(sub) > 1 and isinstance(sub[1], (list, tuple)) else 0.0
+                normalized = normalize_text_confidence(text, conf, threshold=0.6)
+                if normalized:
+                    lines.append(normalized)
+        else:
+            # expected [box, (text, conf)]
+            pair = item[1] if len(item) > 1 else None
+            if pair:
+                text = pair[0] if len(pair) > 0 else ''
+                conf = float(pair[1]) if len(pair) > 1 else 0.0
+                normalized = normalize_text_confidence(text, conf, threshold=0.6)
+                if normalized:
+                    lines.append(normalized)
 
     final = '\n'.join(lines).strip()
     if not final:

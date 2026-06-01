@@ -1,4 +1,4 @@
-EasyOCR microservice
+PaddleOCR microservice
 
 Requirements
 - Python 3.9+
@@ -14,6 +14,6 @@ Endpoints
 - `POST /ocr` - multipart form upload (`image` field) returns JSON `{ "text": "..." }`
 
 Notes
-- Service performs preprocessing (deskew, CLAHE, denoise, sharpen, threshold) before running EasyOCR.
+- Service performs preprocessing (deskew, CLAHE, denoise, sharpen, threshold) before running PaddleOCR.
 - Low-confidence characters (confidence < 0.6) are replaced with `?`.
 - If no readable text remains, the service returns `GEEN TEKST GEVONDEN` as `text`.
