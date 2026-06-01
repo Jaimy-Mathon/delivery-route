@@ -545,6 +545,7 @@ export default function HomePage() {
   const [ocrProgress, setOcrProgress] = useState(0);
   const [ocrScanMode, setOcrScanMode] = useState<OcrScanMode>("mixed");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [preferEasyOcr, setPreferEasyOcr] = useState(false);
 
   const fileToDataUrl = (file: File) =>
     new Promise<string>((resolve, reject) => {
@@ -614,79 +615,117 @@ export default function HomePage() {
     setOcrProgress(0);
 
     try {
-      const { createWorker, PSM } = await import("tesseract.js");
+      // Decide whether to use EasyOCR microservice
+      let useEasyOcr = false;
+      try {
+        const health = await fetch("http://localhost:8000/health", { method: "GET" });
+        useEasyOcr = health.ok;
+      } catch {
+        useEasyOcr = false;
+      }
+      if (preferEasyOcr) {
+        if (!useEasyOcr) {
+          toast.error("EasyOCR service not reachable. Toggle off or start the service.");
+          return;
+        }
+      }
+
       const recognizedTexts: string[] = [];
       let successfulCount = 0;
 
-      const { scanModes, workerParams } = getOcrProfile(ocrScanMode, PSM);
-      const worker = await createWorker("eng+nld");
-      const nativeTextDetector = createNativeTextDetector();
-
-      try {
-        await worker.setParameters(workerParams);
-
+      if (useEasyOcr && preferEasyOcr) {
         for (let fileIndex = 0; fileIndex < selectedFiles.length; fileIndex += 1) {
           const file = selectedFiles[fileIndex];
-
           try {
-            const variants = await buildOcrVariants(file);
-            const nativeAttempts = nativeTextDetector ? variants.length : 0;
-            const attempts = nativeAttempts + variants.length * scanModes.length;
-            let attemptIndex = 0;
-            const candidates: Array<{ score: number; text: string }> = [];
-
-            if (nativeTextDetector) {
-              for (const variant of variants) {
-                const nativeBlocks = await nativeTextDetector.detect(variant.canvas);
-                const nativeText = extractNativeBlockText(nativeBlocks);
-
-                if (nativeText) {
-                  const nativeBoost = ocrScanMode === "screen" ? 20 : 10;
-                  candidates.push({
-                    score: scoreOcrText(nativeText, 85 + nativeBoost),
-                    text: normalizeRecognizedText(nativeText),
-                  });
-                }
-
-                attemptIndex += 1;
-                const progress = ((fileIndex + attemptIndex / attempts) / selectedFiles.length) * 100;
-                setOcrProgress(Math.round(progress));
-              }
-            }
-
-            for (const variant of variants) {
-              for (const mode of scanModes) {
-                await worker.setParameters({ tessedit_pageseg_mode: mode });
-                const result = (await worker.recognize(
-                  variant.image,
-                  { rotateAuto: true },
-                  undefined,
-                  `photo-${fileIndex}-${variant.label}-${mode}`,
-                )) as any;
-
-                const text = normalizeSymbolConfidenceText(result.data?.text ?? "", result.data?.symbols ?? []);
-                const score = scoreOcrText(text, result.data?.confidence ?? 0);
-                candidates.push({ score, text });
-
-                attemptIndex += 1;
-                const progress = ((fileIndex + attemptIndex / attempts) / selectedFiles.length) * 100;
-                setOcrProgress(Math.round(progress));
-              }
-            }
-
-            const best = candidates.sort((left, right) => right.score - left.score)[0];
-            if (!best || best.text.trim().length < 4 || best.text === "GEEN TEKST GEVONDEN") {
+            const form = new FormData();
+            form.append("image", file);
+            const resp = await fetch("http://localhost:8000/ocr", { method: "POST", body: form });
+            if (!resp.ok) throw new Error("Service error");
+            const json = await resp.json();
+            const text = (json?.text ?? "").trim();
+            if (!text || text === "GEEN TEKST GEVONDEN") {
               throw new Error("No usable OCR output");
             }
-
-            recognizedTexts.push(best.text);
+            recognizedTexts.push(text);
             successfulCount += 1;
-          } catch {
-            toast.warning(`Failed to scan ${file.name}. Continuing with the next photo.`);
+          } catch (err) {
+            toast.warning(`Failed to scan ${file.name} via EasyOCR. Continuing with the next photo.`);
           }
+          const progress = Math.round(((fileIndex + 1) / selectedFiles.length) * 100);
+          setOcrProgress(progress);
         }
-      } finally {
-        await worker.terminate();
+      } else {
+        const { createWorker, PSM } = await import("tesseract.js");
+        const { scanModes, workerParams } = getOcrProfile(ocrScanMode, PSM);
+        const worker = await createWorker("eng+nld");
+        const nativeTextDetector = createNativeTextDetector();
+
+        try {
+          await worker.setParameters(workerParams);
+
+          for (let fileIndex = 0; fileIndex < selectedFiles.length; fileIndex += 1) {
+            const file = selectedFiles[fileIndex];
+
+            try {
+              const variants = await buildOcrVariants(file);
+              const nativeAttempts = nativeTextDetector ? variants.length : 0;
+              const attempts = nativeAttempts + variants.length * scanModes.length;
+              let attemptIndex = 0;
+              const candidates: Array<{ score: number; text: string }> = [];
+
+              if (nativeTextDetector) {
+                for (const variant of variants) {
+                  const nativeBlocks = await nativeTextDetector.detect(variant.canvas);
+                  const nativeText = extractNativeBlockText(nativeBlocks);
+
+                  if (nativeText) {
+                    const nativeBoost = ocrScanMode === "screen" ? 20 : 10;
+                    candidates.push({
+                      score: scoreOcrText(nativeText, 85 + nativeBoost),
+                      text: normalizeRecognizedText(nativeText),
+                    });
+                  }
+
+                  attemptIndex += 1;
+                  const progress = ((fileIndex + attemptIndex / attempts) / selectedFiles.length) * 100;
+                  setOcrProgress(Math.round(progress));
+                }
+              }
+
+              for (const variant of variants) {
+                for (const mode of scanModes) {
+                  await worker.setParameters({ tessedit_pageseg_mode: mode });
+                  const result = (await worker.recognize(
+                    variant.image,
+                    { rotateAuto: true },
+                    undefined,
+                    `photo-${fileIndex}-${variant.label}-${mode}`,
+                  )) as any;
+
+                  const text = normalizeSymbolConfidenceText(result.data?.text ?? "", result.data?.symbols ?? []);
+                  const score = scoreOcrText(text, result.data?.confidence ?? 0);
+                  candidates.push({ score, text });
+
+                  attemptIndex += 1;
+                  const progress = ((fileIndex + attemptIndex / attempts) / selectedFiles.length) * 100;
+                  setOcrProgress(Math.round(progress));
+                }
+              }
+
+              const best = candidates.sort((left, right) => right.score - left.score)[0];
+              if (!best || best.text.trim().length < 4 || best.text === "GEEN TEKST GEVONDEN") {
+                throw new Error("No usable OCR output");
+              }
+
+              recognizedTexts.push(best.text);
+              successfulCount += 1;
+            } catch {
+              toast.warning(`Failed to scan ${file.name}. Continuing with the next photo.`);
+            }
+          }
+        } finally {
+          await worker.terminate();
+        }
       }
 
       if (successfulCount === 0) {
@@ -928,6 +967,18 @@ export default function HomePage() {
                       ? "Best effort for handwritten notes with uneven spacing."
                       : "Balanced mode that tries multiple OCR strategies."}
                 </p>
+              </CardContent>
+            </Card>
+            <Card className="rounded-2xl shadow-sm">
+              <CardContent className="space-y-3 p-4">
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">OCR Engine</p>
+                <div className="flex items-center justify-between gap-4 rounded-xl bg-muted/40 px-4 py-3">
+                  <div>
+                    <p className="text-sm font-semibold">Prefer EasyOCR service</p>
+                    <p className="text-xs text-muted-foreground">If enabled the app will require the local EasyOCR service.</p>
+                  </div>
+                  <Switch checked={preferEasyOcr} onCheckedChange={(next) => setPreferEasyOcr(Boolean(next))} />
+                </div>
               </CardContent>
             </Card>
             <div className="grid grid-cols-2 gap-2">
