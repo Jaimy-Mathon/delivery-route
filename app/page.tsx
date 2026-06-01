@@ -67,6 +67,288 @@ function computeOtsuThreshold(histogram: number[], totalPixels: number) {
   return threshold;
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function createGrayscaleCanvas(source: HTMLCanvasElement) {
+  const canvas = cloneCanvas(source);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    throw new Error("Canvas preprocessing is unavailable");
+  }
+
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const { data } = imageData;
+  for (let index = 0; index < data.length; index += 4) {
+    const luminance = Math.round(0.2126 * data[index] + 0.7152 * data[index + 1] + 0.0722 * data[index + 2]);
+    data[index] = luminance;
+    data[index + 1] = luminance;
+    data[index + 2] = luminance;
+  }
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function computeSkewAngle(canvas: HTMLCanvasElement) {
+  const grayscale = createGrayscaleCanvas(canvas);
+  const ctx = grayscale.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    throw new Error("Canvas preprocessing is unavailable");
+  }
+
+  const width = grayscale.width;
+  const height = grayscale.height;
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const { data } = imageData;
+  let sumX = 0;
+  let sumY = 0;
+  let count = 0;
+  const sample = Math.max(2, Math.floor(Math.min(width, height) / 200));
+
+  for (let y = sample; y < height - sample; y += sample) {
+    for (let x = sample; x < width - sample; x += sample) {
+      const index = (y * width + x) * 4;
+      const left = data[index - 4];
+      const right = data[index + 4];
+      const up = data[index - width * 4];
+      const down = data[index + width * 4];
+      const gx = right - left;
+      const gy = down - up;
+      const magnitude = Math.abs(gx) + Math.abs(gy);
+      if (magnitude < 40) continue;
+      sumX += gx * magnitude;
+      sumY += gy * magnitude;
+      count += 1;
+    }
+  }
+
+  if (count === 0) {
+    return 0;
+  }
+
+  const angle = Math.atan2(sumY / count, sumX / count) * (180 / Math.PI);
+  return clamp(-angle, -5, 5);
+}
+
+function deskewCanvas(source: HTMLCanvasElement) {
+  const angle = computeSkewAngle(source);
+  if (Math.abs(angle) < 0.4) {
+    return source;
+  }
+
+  const radians = (angle * Math.PI) / 180;
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Canvas preprocessing is unavailable");
+  }
+
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.rotate(radians);
+  ctx.drawImage(source, -source.width / 2, -source.height / 2);
+  return canvas;
+}
+
+function applyAdaptiveContrast(source: HTMLCanvasElement) {
+  const grayscale = createGrayscaleCanvas(source);
+  const blurred = cloneCanvas(grayscale);
+  const blurCtx = blurred.getContext("2d", { willReadFrequently: true });
+  if (!blurCtx) {
+    throw new Error("Canvas preprocessing is unavailable");
+  }
+  blurCtx.filter = "blur(16px)";
+  blurCtx.drawImage(grayscale, 0, 0);
+  blurCtx.filter = "none";
+
+  const sourceCtx = grayscale.getContext("2d", { willReadFrequently: true });
+  if (!sourceCtx) {
+    throw new Error("Canvas preprocessing is unavailable");
+  }
+
+  const sourceData = sourceCtx.getImageData(0, 0, grayscale.width, grayscale.height);
+  const blurredData = blurCtx.getImageData(0, 0, grayscale.width, grayscale.height);
+  const output = sourceCtx.createImageData(grayscale.width, grayscale.height);
+
+  for (let index = 0; index < sourceData.data.length; index += 4) {
+    const value = sourceData.data[index];
+    const background = blurredData.data[index];
+    const corrected = clamp(Math.round((value - background) * 1.4 + 128), 0, 255);
+    output.data[index] = corrected;
+    output.data[index + 1] = corrected;
+    output.data[index + 2] = corrected;
+    output.data[index + 3] = 255;
+  }
+
+  sourceCtx.putImageData(output, 0, 0);
+  return grayscale;
+}
+
+function reduceNoise(source: HTMLCanvasElement) {
+  const canvas = cloneCanvas(source);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    throw new Error("Canvas preprocessing is unavailable");
+  }
+
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const { data } = imageData;
+  const copy = new Uint8ClampedArray(data);
+  const width = canvas.width;
+  const height = canvas.height;
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const neighbors = [];
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const offset = ((y + dy) * width + (x + dx)) * 4;
+          neighbors.push(copy[offset]);
+        }
+      }
+      neighbors.sort((a, b) => a - b);
+      const median = neighbors[4];
+      const offset = (y * width + x) * 4;
+      data[offset] = median;
+      data[offset + 1] = median;
+      data[offset + 2] = median;
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function sharpenCanvas(source: HTMLCanvasElement) {
+  const original = createGrayscaleCanvas(source);
+  const blurred = cloneCanvas(original);
+  const blurCtx = blurred.getContext("2d", { willReadFrequently: true });
+  if (!blurCtx) {
+    throw new Error("Canvas preprocessing is unavailable");
+  }
+  blurCtx.filter = "blur(2px)";
+  blurCtx.drawImage(original, 0, 0);
+  blurCtx.filter = "none";
+
+  const ctx = original.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    throw new Error("Canvas preprocessing is unavailable");
+  }
+
+  const originalData = ctx.getImageData(0, 0, original.width, original.height);
+  const blurredData = blurCtx.getImageData(0, 0, original.width, original.height);
+
+  for (let index = 0; index < originalData.data.length; index += 4) {
+    const sharpened = clamp(Math.round(originalData.data[index] * 1.6 - blurredData.data[index] * 0.6), 0, 255);
+    originalData.data[index] = sharpened;
+    originalData.data[index + 1] = sharpened;
+    originalData.data[index + 2] = sharpened;
+  }
+  ctx.putImageData(originalData, 0, 0);
+  return original;
+}
+
+function buildTextSegmentationCanvas(source: HTMLCanvasElement) {
+  const grayscale = createGrayscaleCanvas(source);
+  const ctx = grayscale.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    throw new Error("Canvas preprocessing is unavailable");
+  }
+
+  const width = grayscale.width;
+  const height = grayscale.height;
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const rowSums = new Uint32Array(height);
+
+  for (let y = 0; y < height; y += 1) {
+    let rowSum = 0;
+    for (let x = 0; x < width; x += 1) {
+      const index = (y * width + x) * 4;
+      rowSum += 255 - imageData.data[index];
+    }
+    rowSums[y] = rowSum;
+  }
+
+  const threshold = width * 25;
+  const segments: Array<[number, number]> = [];
+  let start: number | null = null;
+
+  for (let y = 0; y < height; y += 1) {
+    const hasText = rowSums[y] > threshold;
+    if (hasText && start === null) {
+      start = y;
+    } else if (!hasText && start !== null) {
+      segments.push([start, y]);
+      start = null;
+    }
+  }
+  if (start !== null) {
+    segments.push([start, height]);
+  }
+
+  if (segments.length <= 1) {
+    return grayscale;
+  }
+
+  const output = document.createElement("canvas");
+  output.width = width;
+  output.height = height;
+  const outputCtx = output.getContext("2d");
+  if (!outputCtx) {
+    throw new Error("Canvas preprocessing is unavailable");
+  }
+  outputCtx.fillStyle = "white";
+  outputCtx.fillRect(0, 0, width, height);
+
+  for (const [segmentStart, segmentEnd] of segments) {
+    const segmentHeight = Math.max(1, segmentEnd - segmentStart);
+    const segmentData = ctx.getImageData(0, segmentStart, width, segmentHeight);
+    outputCtx.putImageData(segmentData, 0, segmentStart);
+  }
+
+  return output;
+}
+
+function normalizeRecognizedText(text: string) {
+  const normalized = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/ ?\n ?/g, "\n")
+    .trim();
+
+  return normalized.length > 0 ? normalized : "GEEN TEKST GEVONDEN";
+}
+
+function normalizeSymbolConfidenceText(text: string, symbols: Array<{ text: string; confidence?: number }>) {
+  if (!symbols.length) {
+    return normalizeRecognizedText(text);
+  }
+
+  let output = "";
+  let position = 0;
+
+  for (const symbol of symbols) {
+    const character = symbol.text ?? "";
+    const confidence = symbol.confidence ?? 0;
+    if (!character) continue;
+    if (confidence < 60 && /[A-Za-z0-9]/.test(character)) {
+      output += "?";
+    } else {
+      output += character;
+    }
+    position += 1;
+  }
+
+  if (output.length === 0) {
+    return "GEEN TEKST GEVONDEN";
+  }
+
+  return normalizeRecognizedText(output);
+}
+
 function loadImage(file: File) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image();
@@ -191,23 +473,13 @@ async function buildOcrVariants(file: File): Promise<OcrVariant[]> {
   if (!baseContext) {
     throw new Error("Canvas preprocessing is unavailable");
   }
-
   baseContext.drawImage(image, 0, 0, baseCanvas.width, baseCanvas.height);
 
-  const contrastCanvas = document.createElement("canvas");
-  contrastCanvas.width = baseCanvas.width;
-  contrastCanvas.height = baseCanvas.height;
-
-  const contrastContext = contrastCanvas.getContext("2d", { willReadFrequently: true });
-  if (!contrastContext) {
-    throw new Error("Canvas preprocessing is unavailable");
-  }
-
-  contrastContext.filter = "contrast(190%) saturate(0%) brightness(120%)";
-  contrastContext.drawImage(baseCanvas, 0, 0);
-  contrastContext.filter = "none";
-
-  const binaryCanvas = cloneCanvas(contrastCanvas);
+  const deskewed = deskewCanvas(baseCanvas);
+  const normalized = applyAdaptiveContrast(deskewed);
+  const denoised = reduceNoise(normalized);
+  const sharpened = sharpenCanvas(denoised);
+  const binaryCanvas = cloneCanvas(sharpened);
   const binaryContext = binaryCanvas.getContext("2d", { willReadFrequently: true });
   if (!binaryContext) {
     throw new Error("Canvas preprocessing is unavailable");
@@ -217,19 +489,16 @@ async function buildOcrVariants(file: File): Promise<OcrVariant[]> {
   const { data } = imageData;
   const histogram = new Array<number>(256).fill(0);
   const grayscale = new Uint8Array(data.length / 4);
-
   let sumLuminance = 0;
+
   for (let index = 0; index < data.length; index += 4) {
     const red = data[index];
     const green = data[index + 1];
     const blue = data[index + 2];
-    const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-    const boosted = Math.max(0, Math.min(255, Math.round((luminance - 128) * 1.2 + 128)));
-
-    const pixelIndex = index / 4;
-    grayscale[pixelIndex] = boosted;
-    histogram[boosted] += 1;
-    sumLuminance += boosted;
+    const luminance = Math.round(0.2126 * red + 0.7152 * green + 0.0722 * blue);
+    grayscale[index / 4] = luminance;
+    histogram[luminance] += 1;
+    sumLuminance += luminance;
   }
 
   const threshold = computeOtsuThreshold(histogram, grayscale.length);
@@ -240,7 +509,6 @@ async function buildOcrVariants(file: File): Promise<OcrVariant[]> {
     const value = grayscale[index / 4];
     const isTextPixel = invert ? value > threshold : value < threshold;
     const output = isTextPixel ? 0 : 255;
-
     data[index] = output;
     data[index + 1] = output;
     data[index + 2] = output;
@@ -249,10 +517,13 @@ async function buildOcrVariants(file: File): Promise<OcrVariant[]> {
 
   binaryContext.putImageData(imageData, 0, 0);
 
+  const segmented = buildTextSegmentationCanvas(sharpened);
+
   return [
     { label: "original", image: canvasToPng(baseCanvas), canvas: baseCanvas },
-    { label: "contrast", image: canvasToPng(contrastCanvas), canvas: contrastCanvas },
+    { label: "enhanced", image: canvasToPng(sharpened), canvas: sharpened },
     { label: "binary", image: canvasToPng(binaryCanvas), canvas: binaryCanvas },
+    { label: "segmented", image: canvasToPng(segmented), canvas: segmented },
   ];
 }
 
@@ -373,7 +644,7 @@ export default function HomePage() {
                   const nativeBoost = ocrScanMode === "screen" ? 20 : 10;
                   candidates.push({
                     score: scoreOcrText(nativeText, 85 + nativeBoost),
-                    text: nativeText,
+                    text: normalizeRecognizedText(nativeText),
                   });
                 }
 
@@ -386,15 +657,15 @@ export default function HomePage() {
             for (const variant of variants) {
               for (const mode of scanModes) {
                 await worker.setParameters({ tessedit_pageseg_mode: mode });
-                const result = await worker.recognize(
+                const result = (await worker.recognize(
                   variant.image,
                   { rotateAuto: true },
                   undefined,
                   `photo-${fileIndex}-${variant.label}-${mode}`,
-                );
+                )) as any;
 
-                const text = result.data.text ?? "";
-                const score = scoreOcrText(text, result.data.confidence ?? 0);
+                const text = normalizeSymbolConfidenceText(result.data?.text ?? "", result.data?.symbols ?? []);
+                const score = scoreOcrText(text, result.data?.confidence ?? 0);
                 candidates.push({ score, text });
 
                 attemptIndex += 1;
@@ -404,7 +675,7 @@ export default function HomePage() {
             }
 
             const best = candidates.sort((left, right) => right.score - left.score)[0];
-            if (!best || best.text.trim().length < 4) {
+            if (!best || best.text.trim().length < 4 || best.text === "GEEN TEKST GEVONDEN") {
               throw new Error("No usable OCR output");
             }
 
