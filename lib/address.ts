@@ -8,6 +8,28 @@ function normalizeWhitespace(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function normalizeOcrArtifacts(value: string) {
+  return value
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/\b([0-9OIlS]{4})\s?([A-Za-z0-9]{2})\b/g, (_, digits: string, letters: string) => {
+      const normalizedDigits = digits
+        .replace(/[Oo]/g, "0")
+        .replace(/[Il]/g, "1")
+        .replace(/S/g, "5");
+      const normalizedLetters = letters
+        .replace(/0/g, "O")
+        .replace(/1/g, "I")
+        .replace(/5/g, "S")
+        .replace(/8/g, "B")
+        .toUpperCase();
+
+      return `${normalizedDigits} ${normalizedLetters}`;
+    })
+    .replace(/(?<=\d)[Oo](?=\d|\b)/g, "0")
+    .replace(/(?<=\d)[Il](?=\d|\b)/g, "1");
+}
+
 function titleCase(value: string) {
   return value
     .toLowerCase()
@@ -25,7 +47,7 @@ export function formatAddress(stop: EditableAddress | AddressStop) {
 
 function cleanLine(rawInput: string) {
   return normalizeWhitespace(
-    rawInput
+    normalizeOcrArtifacts(rawInput)
       .replace(/[•·|]/g, " ")
       .replace(/[–—]/g, "-")
       .replace(/\s*,\s*/g, ", "),

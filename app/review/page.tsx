@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   DndContext,
@@ -22,9 +22,11 @@ import {
   List,
   MapPinned,
   MoreHorizontal,
+  Mic,
   Pencil,
   Plus,
   Settings2,
+  Square,
   Trash2,
   Route,
   Navigation,
@@ -60,6 +62,26 @@ import { AddressStop } from "@/types/route";
 import { Switch } from "@/components/ui/switch";
 
 const PAGE_SIZE = 20;
+
+type SpeechRecognitionCtor = new () => {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+
+function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
+  const speechWindow = window as typeof window & {
+    SpeechRecognition?: SpeechRecognitionCtor;
+    webkitSpeechRecognition?: SpeechRecognitionCtor;
+  };
+
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
+}
 
 function SortableRow({
   stop,
@@ -150,6 +172,8 @@ export default function ReviewPage() {
   const [page, setPage] = useState(1);
   const [editTarget, setEditTarget] = useState<AddressStop | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [isDictating, setIsDictating] = useState(false);
+  const recognitionRef = useRef<InstanceType<SpeechRecognitionCtor> | null>(null);
 
   const duplicates = useMemo(() => duplicateKeys(stops), [stops]);
 
@@ -189,6 +213,51 @@ export default function ReviewPage() {
     router.push("/navigation");
   };
 
+  const startDictation = () => {
+    const SpeechRecognition = getSpeechRecognitionCtor();
+    if (!SpeechRecognition) {
+      toast.error("Speech dictation is not supported on this device/browser.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "nl-NL";
+
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .map((result) => result[0]?.transcript ?? "")
+        .join("\n")
+        .trim();
+
+      setEditableRaw((current) => {
+        if (!transcript) return current;
+        return current.trim().length > 0 ? `${current.trim()}\n${transcript}` : transcript;
+      });
+    };
+
+    recognition.onerror = (event) => {
+      setIsDictating(false);
+      toast.error(`Speech dictation failed: ${event.error}`);
+    };
+
+    recognition.onend = () => {
+      setIsDictating(false);
+      recognitionRef.current = null;
+    };
+
+    recognitionRef.current = recognition;
+    setIsDictating(true);
+    recognition.start();
+  };
+
+  const stopDictation = () => {
+    recognitionRef.current?.stop();
+    recognitionRef.current = null;
+    setIsDictating(false);
+  };
+
   return (
     <div className="min-h-screen bg-background">
       <AppHeader />
@@ -222,6 +291,19 @@ export default function ReviewPage() {
             />
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <Button
+                variant={isDictating ? "default" : "secondary"}
+                onClick={() => {
+                  if (isDictating) {
+                    stopDictation();
+                    return;
+                  }
+                  startDictation();
+                }}
+              >
+                {isDictating ? <Square /> : <Mic />}
+                {isDictating ? "Stop dictation" : "Dictate addresses"}
+              </Button>
+              <Button
                 variant="outline"
                 onClick={() => {
                   setRawText(editableRaw);
@@ -248,6 +330,9 @@ export default function ReviewPage() {
                 <Plus /> Add stop
               </Button>
             </div>
+            <p className="text-xs text-muted-foreground">
+              No OCR? Read the addresses out loud from the scanner screen, then tap re-extract.
+            </p>
           </CardContent>
         </Card>
 
